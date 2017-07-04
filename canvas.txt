@@ -1,0 +1,182 @@
+interpolateField(grid, bounds, scale, callback) {
+    // const projection = d3.geo.mercator().precision(0.1);
+    const projection = d3.geoMercator().precision(0.1);
+    const velocityScale = bounds.height * VELOCITY_SCALE;
+
+    const columns = [];
+    const point = [];
+    let xx = bounds.x;
+    // const scale = { bounds }; // grid.recipe.scale; //, gradient = scale.gradient;
+    // const scale = this.gradient([0, 1000], '#66B3FF', '#FF2D2D', 0.3);
+    const map = this._map;
+    let mask;
+
+    function spread(p, low, high) {
+      return p * (high - low) + low;
+    }
+
+
+    if (scale) {
+      mask = this.createMask();
+      const colorBar = (d3.select(`.${styles.shadowColor}`)).node();
+      const g = colorBar.getContext('2d');
+      const n = colorBar.width - 1;
+      for (let i = 0; i <= n; i++) {
+        const rgb = scale.gradient(spread(i / n, scale.bounds[0], scale.bounds[1]), 1);
+        g.fillStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+        g.fillRect(i, 0, 1, colorBar.height);
+      }
+      const w = scale.bounds[1] - scale.bounds[0];
+      for (let i = 0; i < 6; i++) {
+        const leveltip = $(`.${styles.leveltip} td:nth-child(${i + 1})`);
+        const val = scale.bounds[0] + (i + 0.5) * w / 6;
+        leveltip.html(parseInt(this._overlayProduct.units[0].conversion(val), 10));
+      }
+    }
+
+    function invert(x) {
+      const p = map.containerPointToLatLng(L.point(x[1], x[0]));
+      return [p.lng, p.lat];
+    }
+
+    function project(x) {
+      let p = map.project(L.latLng(x[1], x[0]));
+      p = p._subtract(map.getPixelOrigin());
+      p = L.point(p).add(map._getMapPanePos());
+      return [p.x, p.y];
+    }
+
+    /**
+     * @returns {Boolean} true if the specified value is not null and not undefined.
+     */
+    function isValue(x) {
+      return x !== null && x !== undefined;
+    }
+
+    function distortion(projectionname, ¦Ë, ¦Õ, x, y) {
+      const ¦Ó = 2 * Math.PI;
+      const H = Math.pow(10, -5.2);
+      const h¦Ë = ¦Ë < 0 ? H : -H;
+      const h¦Õ = ¦Õ < 0 ? H : -H;
+      const p¦Ë = project([¦Ë + h¦Ë, ¦Õ]);
+      const p¦Õ = project([¦Ë, ¦Õ + h¦Õ]);
+      // var p¦Ë = projection([¦Ë + h¦Ë, ¦Õ]);
+      // var p¦Õ = projection([¦Ë, ¦Õ + h¦Õ]);
+
+      // Meridian scale factor (see Snyder, equation 4-3), where R = 1. This handles issue where length of 1o ¦Ë
+      // changes depending on ¦Õ. Without this, there is a pinching effect at the poles.
+      const k = Math.cos(¦Õ / 360 * ¦Ó);
+      return [
+        (p¦Ë[0] - x) / h¦Ë / k,
+        (p¦Ë[1] - y) / h¦Ë / k,
+        (p¦Õ[0] - x) / h¦Õ,
+        (p¦Õ[1] - y) / h¦Õ
+      ];
+    }
+
+    /**
+     * Calculate distortion of the wind vector caused by the shape of the projection at point (x, y). The wind
+     * vector is modified in place and returned by this function.
+    */
+    function distort(projectionname, ¦Ë, ¦Õ, x, y, scales, wind) {
+      const u = wind[0] * scales;
+      const v = wind[1] * scales;
+      const d = distortion(projectionname, ¦Ë, ¦Õ, x, y);
+
+      // Scale distortion vectors by u and v, then add.
+      wind[0] = d[0] * u + d[2] * v;
+      wind[1] = d[1] * u + d[3] * v;
+      return wind;
+    }
+
+    function interpolateColumn(x) {
+      const column = [];
+      for (let y = bounds.y; y <= bounds.yMax; y += 2) {
+        point[1] = x; point[0] = y;
+        const coord = invert(point);
+        let color = TRANSPARENT_BLACK;
+        if (coord) {
+          const ¦Ë = coord[0];
+          const ¦Õ = coord[1];
+          let scalar;
+          if (isFinite(¦Ë)) {
+            const value = grid.interpolate(¦Ë, ¦Õ);
+            if (value && value[2]) {
+              // ·ç
+              const wind = distort(projection, ¦Ë, ¦Õ, x, y, velocityScale, value);
+              column[y + 1] = column[y] = wind;
+              scalar = wind[2];
+            } else {
+              scalar = value;
+            }
+            if (scale && isValue(scalar)) {
+              color = scale.gradient(scalar, OVERLAY_ALPHA);
+              mask.set(x, y, color);
+              mask.set(x + 1, y, color);
+              mask.set(x, y + 1, color);
+              mask.set(x + 1, y + 1, color);
+            }
+          }
+        }
+      }
+      columns[x + 1] = columns[x] = column;
+    }
+
+    function createField(subcolumns, subbounds, subcallback) {
+      /**
+       * @returns {Array} wind vector [u, v, magnitude] at the point (x, y), or [NaN, NaN, null] if wind
+       *          is undefined at that point.
+       */
+      function field(x, y) {
+        const column = subcolumns[Math.round(x)];
+        return column && column[Math.round(y)] || NULL_WIND_VECTOR;
+      }
+
+      // Frees the massive "columns" array for GC. Without this, the array is leaked (in Chrome) each time a new
+      // field is interpolated because the field closure's context is leaked, for reasons that defy explanation.
+      field.release = () => {
+        // eslint-disable-next-line
+        subcolumns = [];
+        if (mask && mask.imageData) {
+          mask.imageData = [];
+        }
+      };
+
+      field.randomize = o => {  // UNDONE: this method is terrible
+        let x;
+        let y;
+        let safetyNet = 0;
+        do {
+          x = Math.round(Math.floor(Math.random() * subbounds.width) + subbounds.x);
+          y = Math.round(Math.floor(Math.random() * subbounds.height) + subbounds.y);
+        } while (field(x, y)[2] === null && safetyNet++ < 30);
+        o.x = x;
+        o.y = y;
+        return o;
+      };
+      if (scale) {
+        field.overlay = mask.imageData;
+      }
+      // return field;
+      subcallback(bounds, field);
+    }
+
+    (function batchInterpolate() {
+      try {
+        const start = Date.now();
+        while (xx < bounds.width) {
+          interpolateColumn(xx);
+          xx += 2;
+          if ((Date.now() - start) > 400) { // MAX_TASK_TIME) {
+            // Interpolation is taking too long. Schedule the next batch for later and yield.
+            // report.progress((x - bounds.x) / (bounds.xMax - bounds.x));
+            setTimeout(batchInterpolate, 25);
+            return;
+          }
+        }
+        createField(columns, bounds, callback);
+      } catch (e) {
+        console.log('error in batch interp', e);
+      }
+    }());
+  }
